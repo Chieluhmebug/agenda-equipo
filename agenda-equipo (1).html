@@ -1,0 +1,855 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Agenda del Equipo</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+
+<!-- ══════════════════════════════════════════════════════
+     PASO 1: Pega aquí tu configuración de Firebase
+     Ve a: https://console.firebase.google.com
+     Crea un proyecto → Agrega una app Web → copia el firebaseConfig
+     ══════════════════════════════════════════════════════ -->
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+  import { getDatabase, ref, set, onValue, remove, push }
+    from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
+
+  // ▼▼▼ REEMPLAZA ESTO CON TU CONFIGURACIÓN DE FIREBASE ▼▼▼
+  const firebaseConfig = {
+     apiKey: "AIzaSyBTlzKj_YyqBzmjGqnA4VVYEvpI6sPsoFs",
+     authDomain: "agenda-equipo-9001b.firebaseapp.com",
+     databaseURL: "https://agenda-equipo-9001b-default-rtdb.firebaseio.com",
+     projectId: "agenda-equipo-9001b",
+     storageBucket: "agenda-equipo-9001b.firebasestorage.app",
+     messagingSenderId: "827086898562",
+     appId: "1:827086898562:web:7e6e320addc38f6f693b9b"
+  };
+  // ▲▲▲ FIN DE LA CONFIGURACIÓN ▲▲▲
+
+  const IS_CONFIGURED = !firebaseConfig.apiKey.startsWith("TU_");
+
+  let db, currentDateStr;
+
+  // Paleta de colores para asignar automáticamente a nuevos integrantes
+  const COLOR_PALETTE = [
+    { color: "#6B5ECD", bg: "#EEEDFE" },
+    { color: "#0F7A5E", bg: "#D6F5EB" },
+    { color: "#B84A2B", bg: "#FAECE7" },
+    { color: "#A3305A", bg: "#FBEAF0" },
+    { color: "#1A6BAD", bg: "#E6F1FB" },
+    { color: "#3D7A1A", bg: "#EAF3DE" },
+    { color: "#7A5A1A", bg: "#FAEEDA" },
+    { color: "#4A1B8C", bg: "#F0EAFE" },
+    { color: "#1A6B6B", bg: "#E0F5F5" },
+    { color: "#8C1A3A", bg: "#FAEAF0" },
+  ];
+
+  let MEMBERS = []; // Se carga desde Firebase (o localStorage en demo)
+
+  const HOURS = Array.from({length: 14}, (_, i) => i + 7); // 7am – 8pm
+  const DAYS  = ["domingo","lunes","martes","miércoles","jueves","viernes","sábado"];
+  const MONTHS= ["enero","febrero","marzo","abril","mayo","junio","julio","agosto","septiembre","octubre","noviembre","diciembre"];
+
+  let todayBase = new Date();
+  let dayOffset = 0;
+  let visibleMembers = new Set(MEMBERS.map((_,i) => i));
+  let liveEvents = {};
+  let unsubscribe = null;
+
+  // ── Helpers de fecha ──────────────────────────────────
+  function dateKey(offset = dayOffset) {
+    let d = new Date(todayBase);
+    d.setDate(d.getDate() + offset);
+    return d.toISOString().slice(0, 10);
+  }
+
+  function friendlyDate(offset = dayOffset) {
+    let d = new Date(todayBase);
+    d.setDate(d.getDate() + offset);
+    const prefix = offset === 0 ? "Hoy · " : offset === 1 ? "Mañana · " : offset === -1 ? "Ayer · " : "";
+    return prefix + DAYS[d.getDay()] + " " + d.getDate() + " de " + MONTHS[d.getMonth()];
+  }
+
+  // ── Helpers de integrantes ────────────────────────────
+  function makeInitial(name) {
+    const parts = name.trim().split(/\s+/);
+    if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase();
+    return name.slice(0, 2).toUpperCase();
+  }
+
+  function rebuildChips() {
+    const chips = document.getElementById("member-chips");
+    chips.innerHTML = "";
+    visibleMembers = new Set(MEMBERS.map((_, i) => i));
+    MEMBERS.forEach((m, i) => {
+      const c = document.createElement("button");
+      c.className = "member-chip active";
+      c.style.setProperty("--chip-color", m.color);
+      c.style.setProperty("--chip-bg",    m.bg);
+      c.innerHTML = `<span class="chip-dot" style="background:${m.color}"></span>${m.name}`;
+      c.onclick = () => toggleMember(i);
+      chips.appendChild(c);
+    });
+    const sel = document.getElementById("m-member");
+    if (sel) sel.innerHTML = MEMBERS.map((m, i) => `<option value="${i}">${m.name}</option>`).join("");
+  }
+
+  function saveMembersRemote() {
+    if (IS_CONFIGURED && db) {
+      set(ref(db, "miembros"), MEMBERS);
+    } else {
+      localStorage.setItem("agenda_members_demo", JSON.stringify(MEMBERS));
+    }
+  }
+
+  function addMember(name) {
+    name = name.trim();
+    if (!name) return;
+    if (MEMBERS.find(m => m.name.toLowerCase() === name.toLowerCase())) return;
+    if (MEMBERS.length >= 10) return;
+    const palette = COLOR_PALETTE[MEMBERS.length % COLOR_PALETTE.length];
+    MEMBERS.push({ name, color: palette.color, bg: palette.bg, initial: makeInitial(name) });
+    saveMembersRemote();
+    rebuildChips();
+    renderTimeline();
+  }
+
+  function removeMember(idx) {
+    MEMBERS.splice(idx, 1);
+    saveMembersRemote();
+    rebuildChips();
+    renderTimeline();
+  }
+
+  function openMembersModal() {
+    renderMembersList();
+    document.getElementById("modal-members").classList.add("open");
+    setTimeout(() => document.getElementById("new-member-input").focus(), 60);
+  }
+  function closeMembersModal() {
+    document.getElementById("modal-members").classList.remove("open");
+  }
+  function renderMembersList() {
+    const list = document.getElementById("members-list");
+    if (MEMBERS.length === 0) {
+      list.innerHTML = `<p style="color:var(--hint);font-size:13px;text-align:center;padding:12px 0">Sin integrantes aún — agrega el primero</p>`;
+      return;
+    }
+    list.innerHTML = MEMBERS.map((m, i) => `
+      <div style="display:flex;align-items:center;gap:10px;padding:7px 0;border-bottom:1px solid var(--border)">
+        <span style="width:30px;height:30px;border-radius:50%;background:${m.color};color:#fff;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:600;flex-shrink:0">${m.initial}</span>
+        <span style="flex:1;font-size:14px">${escHtml(m.name)}</span>
+        <button onclick="window._removeMember(${i})" style="background:none;border:none;cursor:pointer;color:var(--hint);font-size:14px;padding:4px 8px;border-radius:6px;font-family:inherit;transition:color 0.1s" onmouseover="this.style.color='#B84A2B'" onmouseout="this.style.color='var(--hint)'" title="Eliminar">✕</button>
+      </div>`).join("");
+  }
+  function saveMemberFromInput() {
+    const inp = document.getElementById("new-member-input");
+    const name = inp.value.trim();
+    if (!name) { inp.focus(); return; }
+    addMember(name);
+    inp.value = "";
+    renderMembersList();
+    inp.focus();
+  }
+
+  window._openMembersModal  = openMembersModal;
+  window._closeMembersModal = closeMembersModal;
+  window._saveMemberInput   = saveMemberFromInput;
+  window._removeMember      = (i) => { removeMember(i); renderMembersList(); };
+
+  // ── Firebase helpers ──────────────────────────────────
+  function dbPath(dateStr) {
+    return "eventos/" + dateStr.replaceAll("-", "");
+  }
+
+  function subscribeToDate(dateStr) {
+    if (!db) return;
+    if (unsubscribe) unsubscribe();
+    const r = ref(db, dbPath(dateStr));
+    onValue(r, snap => {
+      liveEvents = snap.val() || {};
+      renderTimeline();
+    });
+    unsubscribe = () => {};
+  }
+
+  function addEvent(memberIdx, hour, text) {
+    const dateStr = dateKey();
+    if (IS_CONFIGURED && db) {
+      const r = ref(db, dbPath(dateStr));
+      push(r, { memberIdx, hour, text, ts: Date.now() });
+    } else {
+      // fallback demo sin Firebase
+      const key = "k" + Date.now();
+      liveEvents[key] = { memberIdx, hour, text, ts: Date.now() };
+      renderTimeline();
+    }
+  }
+
+  function deleteEvent(eventKey) {
+    const dateStr = dateKey();
+    if (IS_CONFIGURED && db) {
+      remove(ref(db, dbPath(dateStr) + "/" + eventKey));
+    } else {
+      delete liveEvents[eventKey];
+      renderTimeline();
+    }
+  }
+
+  // ── Render ─────────────────────────────────────────────
+  function renderTimeline() {
+    const tl = document.getElementById("timeline");
+    tl.innerHTML = "";
+
+    HOURS.forEach(h => {
+      const hourStr = h.toString().padStart(2, "0") + ":00";
+      const row = document.createElement("div");
+      row.className = "time-row";
+
+      const lbl = document.createElement("div");
+      lbl.className = "time-label";
+      lbl.textContent = hourStr;
+
+      const slot = document.createElement("div");
+      slot.className = "time-slot";
+
+      // Eventos de esta hora
+      Object.entries(liveEvents)
+        .filter(([, ev]) => ev.hour === h && visibleMembers.has(ev.memberIdx))
+        .sort(([, a], [, b]) => a.memberIdx - b.memberIdx)
+        .forEach(([key, ev]) => {
+          const m = MEMBERS[ev.memberIdx];
+          const pill = document.createElement("div");
+          pill.className = "event-pill";
+          pill.style.background = m.bg;
+          pill.style.color = m.color;
+          pill.innerHTML = `
+            <span class="pill-avatar" style="background:${m.color};color:#fff">${m.initial}</span>
+            <span class="pill-text">${escHtml(ev.text)}</span>
+            <button class="pill-del" aria-label="Eliminar" onclick="window._delEvent('${key}')">✕</button>`;
+          slot.appendChild(pill);
+        });
+
+      // Botón agregar
+      const btn = document.createElement("button");
+      btn.className = "add-slot-btn";
+      btn.innerHTML = `<svg width="12" height="12" viewBox="0 0 12 12" fill="none"><line x1="6" y1="1" x2="6" y2="11" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><line x1="1" y1="6" x2="11" y2="6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg> agregar`;
+      btn.onclick = () => openModal(h);
+      slot.appendChild(btn);
+
+      row.appendChild(lbl);
+      row.appendChild(slot);
+      tl.appendChild(row);
+    });
+  }
+
+  function escHtml(s) {
+    return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+  }
+
+  // ── Modal ──────────────────────────────────────────────
+  function openModal(hour) {
+    const sel = document.getElementById("m-member");
+    sel.innerHTML = MEMBERS.map((m, i) =>
+      `<option value="${i}">${m.name}</option>`).join("");
+    const hsel = document.getElementById("m-hour");
+    hsel.innerHTML = HOURS.map(h =>
+      `<option value="${h}" ${h === hour ? "selected" : ""}>${h.toString().padStart(2,"0")}:00</option>`).join("");
+    document.getElementById("m-text").value = "";
+    document.getElementById("modal").classList.add("open");
+    setTimeout(() => document.getElementById("m-text").focus(), 60);
+  }
+
+  function closeModal() {
+    document.getElementById("modal").classList.remove("open");
+  }
+
+  function saveModal() {
+    const memberIdx = parseInt(document.getElementById("m-member").value);
+    const hour      = parseInt(document.getElementById("m-hour").value);
+    const text      = document.getElementById("m-text").value.trim();
+    if (!text) { document.getElementById("m-text").focus(); return; }
+    addEvent(memberIdx, hour, text);
+    closeModal();
+  }
+
+  function changeDay(dir) {
+    dayOffset += dir;
+    document.getElementById("date-label").textContent = friendlyDate();
+    liveEvents = {};
+    renderTimeline();
+    const ds = dateKey();
+    if (IS_CONFIGURED && db) subscribeToDate(ds);
+  }
+
+  function toggleMember(idx) {
+    if (visibleMembers.has(idx)) {
+      if (visibleMembers.size === 1) return;
+      visibleMembers.delete(idx);
+    } else {
+      visibleMembers.add(idx);
+    }
+    document.querySelectorAll(".member-chip").forEach((chip, i) => {
+      chip.classList.toggle("active", visibleMembers.has(i));
+    });
+    renderTimeline();
+  }
+
+  // ── Exponer funciones globales ─────────────────────────
+  window._delEvent    = deleteEvent;
+  window._saveModal   = saveModal;
+  window._closeModal  = closeModal;
+  window._changeDay   = changeDay;
+  window._toggleMember= toggleMember;
+
+  // ── Init ───────────────────────────────────────────────
+  document.addEventListener("DOMContentLoaded", () => {
+    document.getElementById("date-label").textContent = friendlyDate();
+
+    if (!IS_CONFIGURED) {
+      document.getElementById("config-banner").style.display = "flex";
+    }
+
+    // Teclado
+    document.addEventListener("keydown", e => {
+      if (e.key === "Escape") { closeModal(); closeMembersModal(); }
+      if (e.key === "Enter" && document.getElementById("modal").classList.contains("open")) saveModal();
+      if (e.key === "Enter" && document.getElementById("modal-members").classList.contains("open")) saveMemberFromInput();
+    });
+    document.getElementById("modal").addEventListener("click", e => {
+      if (e.target === document.getElementById("modal")) closeModal();
+    });
+    document.getElementById("modal-members").addEventListener("click", e => {
+      if (e.target === document.getElementById("modal-members")) closeMembersModal();
+    });
+
+    if (IS_CONFIGURED) {
+      const app = initializeApp(firebaseConfig);
+      db = getDatabase(app);
+
+      // Escuchar integrantes en tiempo real
+      onValue(ref(db, "miembros"), snap => {
+        MEMBERS = snap.val() || [];
+        rebuildChips();
+        renderTimeline();
+      });
+
+      subscribeToDate(dateKey());
+    } else {
+      // Demo: cargar integrantes de localStorage o poner ejemplos
+      const saved = localStorage.getItem("agenda_members_demo");
+      if (saved) {
+        MEMBERS = JSON.parse(saved);
+      } else {
+        MEMBERS = [
+          { name: "Ana García",  color: "#6B5ECD", bg: "#EEEDFE", initial: "AG" },
+          { name: "Luis Mora",   color: "#0F7A5E", bg: "#D6F5EB", initial: "LM" },
+          { name: "Sofía R.",    color: "#B84A2B", bg: "#FAECE7", initial: "SR" },
+        ];
+      }
+      rebuildChips();
+      liveEvents = {
+        "demo1": { memberIdx: 0, hour: 9,  text: "Daily standup", ts: 1 },
+        "demo2": { memberIdx: 1, hour: 9,  text: "Daily standup",  ts: 2 },
+        "demo3": { memberIdx: 0, hour: 10, text: "Revisión de diseño", ts: 3 },
+      };
+      renderTimeline();
+    }
+  });
+</script>
+
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg:       #FAFAF9;
+    --surface:  #FFFFFF;
+    --border:   rgba(0,0,0,0.09);
+    --border-md:rgba(0,0,0,0.15);
+    --text:     #1A1A18;
+    --muted:    #6B6B65;
+    --hint:     #A0A098;
+    --radius:   10px;
+    --shadow:   0 1px 3px rgba(0,0,0,0.07), 0 4px 12px rgba(0,0,0,0.05);
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg:      #141412;
+      --surface: #1E1E1C;
+      --border:  rgba(255,255,255,0.09);
+      --border-md:rgba(255,255,255,0.15);
+      --text:    #EDEDE8;
+      --muted:   #9A9A94;
+      --hint:    #666660;
+    }
+  }
+
+  body {
+    font-family: 'Inter', system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    font-size: 14px;
+    line-height: 1.5;
+    min-height: 100vh;
+  }
+
+  /* ── Banner de configuración ── */
+  #config-banner {
+    display: none;
+    align-items: flex-start;
+    gap: 12px;
+    background: #FFFBEB;
+    border-bottom: 1px solid #FDE68A;
+    padding: 14px 24px;
+    font-size: 13px;
+    color: #78350F;
+  }
+  #config-banner strong { display: block; margin-bottom: 4px; }
+  #config-banner code {
+    background: rgba(0,0,0,0.07);
+    padding: 1px 5px;
+    border-radius: 4px;
+    font-family: monospace;
+    font-size: 12px;
+  }
+  .banner-icon { font-size: 18px; flex-shrink: 0; margin-top: 1px; }
+
+  /* ── Layout principal ── */
+  .app-container {
+    max-width: 860px;
+    margin: 0 auto;
+    padding: 28px 20px 60px;
+  }
+
+  /* ── Cabecera ── */
+  .app-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin-bottom: 24px;
+  }
+  .app-title {
+    font-size: 20px;
+    font-weight: 600;
+    letter-spacing: -0.3px;
+  }
+  .app-title span { color: var(--muted); font-weight: 400; }
+
+  .date-nav {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 6px 10px;
+    box-shadow: var(--shadow);
+  }
+  .date-nav button {
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: var(--muted);
+    padding: 2px 6px;
+    border-radius: 6px;
+    font-size: 16px;
+    line-height: 1;
+    transition: background 0.12s, color 0.12s;
+  }
+  .date-nav button:hover { background: var(--bg); color: var(--text); }
+  #date-label {
+    font-size: 13px;
+    font-weight: 500;
+    min-width: 180px;
+    text-align: center;
+    color: var(--text);
+  }
+
+  /* ── Chips de integrantes ── */
+  .members-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-bottom: 20px;
+  }
+  .members-bar-label {
+    font-size: 12px;
+    color: var(--hint);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    font-weight: 500;
+    margin-right: 4px;
+  }
+  .member-chip {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 12px 5px 8px;
+    border-radius: 20px;
+    border: 1px solid var(--border-md);
+    background: transparent;
+    color: var(--muted);
+    font-size: 13px;
+    cursor: pointer;
+    transition: all 0.13s;
+    font-family: inherit;
+  }
+  .member-chip.active {
+    background: var(--chip-bg);
+    color: var(--chip-color);
+    border-color: transparent;
+    font-weight: 500;
+  }
+  .chip-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    opacity: 0.3;
+  }
+  .member-chip.active .chip-dot { opacity: 1; }
+
+  /* ── Timeline ── */
+  .timeline-wrap {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+    box-shadow: var(--shadow);
+  }
+
+  .time-row {
+    display: grid;
+    grid-template-columns: 56px 1fr;
+    border-bottom: 1px solid var(--border);
+    min-height: 52px;
+  }
+  .time-row:last-child { border-bottom: none; }
+
+  .time-label {
+    font-size: 11px;
+    color: var(--hint);
+    padding: 8px 10px 0 0;
+    text-align: right;
+    border-right: 1px solid var(--border);
+    font-variant-numeric: tabular-nums;
+    background: var(--bg);
+  }
+
+  .time-slot {
+    padding: 6px 8px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+    align-items: flex-start;
+    position: relative;
+  }
+  .time-slot:hover .add-slot-btn { opacity: 1; }
+
+  /* ── Pills de eventos ── */
+  .event-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 8px 4px 5px;
+    border-radius: 20px;
+    font-size: 12px;
+    max-width: 260px;
+    cursor: default;
+  }
+  .pill-avatar {
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 9px;
+    font-weight: 600;
+    flex-shrink: 0;
+    letter-spacing: 0;
+  }
+  .pill-text {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 190px;
+  }
+  .pill-del {
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: currentColor;
+    opacity: 0;
+    font-size: 11px;
+    padding: 0 2px;
+    line-height: 1;
+    border-radius: 3px;
+    flex-shrink: 0;
+    font-family: inherit;
+    transition: opacity 0.1s;
+  }
+  .event-pill:hover .pill-del { opacity: 0.5; }
+  .pill-del:hover { opacity: 1 !important; }
+
+  /* ── Botón agregar en slot ── */
+  .add-slot-btn {
+    opacity: 0;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 3px 10px;
+    border-radius: 20px;
+    border: 1px dashed var(--border-md);
+    background: transparent;
+    color: var(--hint);
+    font-size: 12px;
+    cursor: pointer;
+    font-family: inherit;
+    transition: opacity 0.15s, background 0.12s;
+    position: absolute;
+    right: 8px;
+    top: 50%;
+    transform: translateY(-50%);
+  }
+  .add-slot-btn:hover {
+    background: var(--bg);
+    color: var(--muted);
+    opacity: 1 !important;
+  }
+
+  /* ── Modal ── */
+  #modal {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.4);
+    z-index: 200;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+  }
+  #modal.open { display: flex; }
+  #modal-members.open { display: flex !important; }
+
+  .modal-card {
+    background: var(--surface);
+    border-radius: 14px;
+    border: 1px solid var(--border);
+    box-shadow: 0 20px 60px rgba(0,0,0,0.2);
+    padding: 24px;
+    width: 360px;
+    max-width: 100%;
+  }
+  .modal-card h2 {
+    font-size: 16px;
+    font-weight: 600;
+    margin-bottom: 18px;
+    color: var(--text);
+  }
+  .form-group { margin-bottom: 14px; }
+  .form-group label {
+    display: block;
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--muted);
+    margin-bottom: 5px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .form-group select,
+  .form-group input {
+    width: 100%;
+    padding: 9px 12px;
+    background: var(--bg);
+    border: 1px solid var(--border-md);
+    border-radius: 8px;
+    color: var(--text);
+    font-size: 14px;
+    font-family: inherit;
+    outline: none;
+    transition: border-color 0.12s;
+  }
+  .form-group select:focus,
+  .form-group input:focus { border-color: #6B5ECD; box-shadow: 0 0 0 3px rgba(107,94,205,0.15); }
+
+  .modal-actions {
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+    margin-top: 20px;
+  }
+  .btn {
+    padding: 8px 18px;
+    border-radius: 8px;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    font-family: inherit;
+    transition: all 0.12s;
+  }
+  .btn-ghost {
+    background: transparent;
+    border: 1px solid var(--border-md);
+    color: var(--muted);
+  }
+  .btn-ghost:hover { background: var(--bg); }
+  .btn-primary {
+    background: #1A1A18;
+    border: none;
+    color: #FAFAF9;
+  }
+  .btn-primary:hover { background: #3A3A38; }
+  @media (prefers-color-scheme: dark) {
+    .btn-primary { background: #EDEDE8; color: #1A1A18; }
+    .btn-primary:hover { background: #CCCCC8; }
+  }
+
+  /* ── Responsive ── */
+  @media (max-width: 500px) {
+    .app-header { gap: 8px; }
+    #date-label { min-width: 140px; font-size: 12px; }
+    .pill-text { max-width: 120px; }
+  }
+</style>
+</head>
+<body>
+
+<!-- Banner: solo visible si no está configurado Firebase -->
+<div id="config-banner">
+  <div class="banner-icon">⚙️</div>
+  <div>
+    <strong>Conecta Firebase para guardar datos en la nube</strong>
+    Abre este archivo HTML, busca la sección <code>firebaseConfig</code> y reemplaza los valores con los de tu proyecto.
+    Instrucciones detalladas abajo. Por ahora los datos son de ejemplo y no se guardan.
+  </div>
+</div>
+
+<div class="app-container">
+
+  <div class="app-header">
+    <div class="app-title">Agenda del equipo</div>
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+      <button onclick="_openMembersModal()" style="display:inline-flex;align-items:center;gap:6px;padding:7px 14px;border-radius:var(--radius);border:1px solid var(--border-md);background:var(--surface);color:var(--muted);font-size:13px;font-weight:500;cursor:pointer;font-family:inherit;box-shadow:var(--shadow);transition:background 0.12s,color 0.12s" onmouseover="this.style.color='var(--text)'" onmouseout="this.style.color='var(--muted)'">
+        <svg width="15" height="15" viewBox="0 0 15 15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="5.5" cy="4.5" r="2"/><path d="M1 13c0-2.5 2-4 4.5-4s4.5 1.5 4.5 4"/><circle cx="11" cy="5" r="1.5"/><path d="M13 13c0-2-1.2-3-2.5-3.5"/></svg>
+        Equipo
+      </button>
+      <div class="date-nav">
+        <button onclick="_changeDay(-1)" aria-label="Día anterior">&#8249;</button>
+        <span id="date-label"></span>
+        <button onclick="_changeDay(1)" aria-label="Día siguiente">&#8250;</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="members-bar">
+    <span class="members-bar-label">Ver</span>
+    <div id="member-chips" style="display:contents"></div>
+  </div>
+
+  <div class="timeline-wrap">
+    <div id="timeline"></div>
+  </div>
+
+</div>
+
+<!-- Modal de integrantes -->
+<div id="modal-members" role="dialog" aria-modal="true" aria-labelledby="modal-members-title"
+  style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.4);z-index:200;align-items:center;justify-content:center;padding:20px">
+  <div class="modal-card" style="width:380px">
+    <h2 id="modal-members-title" style="font-size:16px;font-weight:600;margin-bottom:18px;color:var(--text)">Integrantes del equipo</h2>
+
+    <!-- Agregar nuevo -->
+    <div style="display:flex;gap:8px;margin-bottom:16px">
+      <input type="text" id="new-member-input" placeholder="Nombre del integrante…" maxlength="30"
+        style="flex:1;padding:9px 12px;background:var(--bg);border:1px solid var(--border-md);border-radius:8px;color:var(--text);font-size:14px;font-family:inherit;outline:none"
+        onfocus="this.style.borderColor='#6B5ECD';this.style.boxShadow='0 0 0 3px rgba(107,94,205,0.15)'"
+        onblur="this.style.borderColor='';this.style.boxShadow=''">
+      <button class="btn btn-primary" onclick="_saveMemberInput()">Agregar</button>
+    </div>
+
+    <!-- Lista actual -->
+    <div id="members-list" style="max-height:260px;overflow-y:auto"></div>
+
+    <div style="margin-top:16px;font-size:12px;color:var(--hint)">Los cambios se ven en tiempo real para todo el equipo.</div>
+
+    <div class="modal-actions">
+      <button class="btn btn-ghost" onclick="_closeMembersModal()">Listo</button>
+    </div>
+  </div>
+</div>
+
+<!-- Modal para agregar actividad -->
+<div id="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+  <div class="modal-card">
+    <h2 id="modal-title">Nueva actividad</h2>
+    <div class="form-group">
+      <label for="m-member">Integrante</label>
+      <select id="m-member"></select>
+    </div>
+    <div class="form-group">
+      <label for="m-hour">Hora</label>
+      <select id="m-hour"></select>
+    </div>
+    <div class="form-group">
+      <label for="m-text">¿Qué vas a hacer?</label>
+      <input type="text" id="m-text" placeholder="Ej. Reunión con cliente, Revisión de código…" maxlength="80">
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" onclick="_closeModal()">Cancelar</button>
+      <button class="btn btn-primary" onclick="_saveModal()">Guardar</button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════
+  📋 INSTRUCCIONES PARA CONECTAR FIREBASE (gratis, sin costo)
+  ═══════════════════════════════════════════════════════════════
+
+  1. Ve a https://console.firebase.google.com
+  2. Crea un proyecto (botón "Agregar proyecto"), dale cualquier nombre
+  3. En la página del proyecto, haz clic en el ícono </> (Web) para agregar una app
+  4. Registra la app, Google te da un bloque "firebaseConfig" con tus datos
+  5. Copia esos valores y pégalos arriba en la sección firebaseConfig
+
+  6. Activa Realtime Database:
+     - En el menú izquierdo: Compilación → Realtime Database
+     - Clic en "Crear una base de datos"
+     - Elige ubicación (cualquiera está bien)
+     - Selecciona "Comenzar en modo de prueba" (permite leer/escribir por 30 días)
+     - Después puedes ajustar las reglas de seguridad
+
+  7. Reglas de seguridad recomendadas (en Realtime Database → Reglas):
+     {
+       "rules": {
+         "eventos": {
+           ".read": true,
+           ".write": true
+         },
+         "miembros": {
+           ".read": true,
+           ".write": true
+         }
+       }
+     }
+     (Esto permite a todos leer y escribir. Si quieres login, avísame.)
+
+  8. El plan gratuito (Spark) incluye:
+     - 1 GB de almacenamiento
+     - 10 GB de transferencia por mes
+     - Conexiones simultáneas ilimitadas
+     Más que suficiente para un equipo pequeño.
+
+  9. Personalizar integrantes: busca el arreglo MEMBERS en este archivo
+     y cambia los nombres por los de tu equipo.
+═══════════════════════════════════════════════════════════════ -->
+
+</body>
+</html>
