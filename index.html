@@ -19,13 +19,13 @@
 
   // ▼▼▼ REEMPLAZA ESTO CON TU CONFIGURACIÓN DE FIREBASE ▼▼▼
   const firebaseConfig = {
-     apiKey: "AIzaSyBTlzKj_YyqBzmjGqnA4VVYEvpI6sPsoFs",
-     authDomain: "agenda-equipo-9001b.firebaseapp.com",
-     databaseURL: "https://agenda-equipo-9001b-default-rtdb.firebaseio.com",
-     projectId: "agenda-equipo-9001b",
-     storageBucket: "agenda-equipo-9001b.firebasestorage.app",
-     messagingSenderId: "827086898562",
-     appId: "1:827086898562:web:7e6e320addc38f6f693b9b"
+    apiKey:            "TU_API_KEY",
+    authDomain:        "TU_PROYECTO.firebaseapp.com",
+    databaseURL:       "https://TU_PROYECTO-default-rtdb.firebaseio.com",
+    projectId:         "TU_PROYECTO",
+    storageBucket:     "TU_PROYECTO.appspot.com",
+    messagingSenderId: "TU_SENDER_ID",
+    appId:             "TU_APP_ID"
   };
   // ▲▲▲ FIN DE LA CONFIGURACIÓN ▲▲▲
 
@@ -279,10 +279,28 @@
   function changeDay(dir) {
     dayOffset += dir;
     document.getElementById("date-label").textContent = friendlyDate();
+    syncDatePicker();
     liveEvents = {};
     renderTimeline();
     const ds = dateKey();
     if (IS_CONFIGURED && db) subscribeToDate(ds);
+  }
+
+  function jumpToDate(val) {
+    if (!val) return;
+    const base = new Date(todayBase.toISOString().slice(0,10) + "T12:00:00");
+    const target = new Date(val + "T12:00:00");
+    dayOffset = Math.round((target - base) / 86400000);
+    document.getElementById("date-label").textContent = friendlyDate();
+    liveEvents = {};
+    renderTimeline();
+    const ds = dateKey();
+    if (IS_CONFIGURED && db) subscribeToDate(ds);
+  }
+
+  function syncDatePicker() {
+    const picker = document.getElementById("date-picker");
+    if (picker) picker.value = dateKey();
   }
 
   function toggleMember(idx) {
@@ -303,11 +321,13 @@
   window._saveModal   = saveModal;
   window._closeModal  = closeModal;
   window._changeDay   = changeDay;
+  window._jumpToDate  = jumpToDate;
   window._toggleMember= toggleMember;
 
   // ── Init ───────────────────────────────────────────────
   document.addEventListener("DOMContentLoaded", () => {
     document.getElementById("date-label").textContent = friendlyDate();
+    syncDatePicker();
 
     if (!IS_CONFIGURED) {
       document.getElementById("config-banner").style.display = "flex";
@@ -745,6 +765,8 @@
         <button onclick="_changeDay(-1)" aria-label="Día anterior">&#8249;</button>
         <span id="date-label"></span>
         <button onclick="_changeDay(1)" aria-label="Día siguiente">&#8250;</button>
+        <input type="date" id="date-picker" onchange="_jumpToDate(this.value)" aria-label="Ir a fecha"
+          style="border:none;background:transparent;color:var(--muted);font-size:13px;cursor:pointer;width:22px;padding:0;outline:none;font-family:inherit;opacity:0.6" title="Ir a una fecha específica">
       </div>
     </div>
   </div>
